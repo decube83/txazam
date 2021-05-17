@@ -2,63 +2,75 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pylab
 from scipy.io import wavfile
-from scipy.fftpack import fft
 from scipy import signal
 from os import listdir
 from os.path import isfile, join
-# fd = os.open('/dev/null',os.O_WRONLY)
-# os.dup2(fd,2)
-audioFiles = [f for f in listdir('library1') if isfile(join('library1', f))]
-for file in audioFiles:
+import json
+import sys
+from pymongo import MongoClient
+import multiprocessing
+from joblib import Parallel, delayed
 
-    myAudio = './library1/'+file
-    # myAudio = './library1/18. Dog_Soldier_Stand_Down.wav'
-    # #"./library1/18. Dog_Soldier_Stand_Down.wav"
-    #Read file and get sampling freq [ usually 44100 Hz ]  and sound object
-    samplingFreq, mySound = wavfile.read(myAudio)
-    #Check if wave file is 16bit or 32 bit. 24bit is not supported
-    mySoundDataType = mySound.dtype
-    #We can convert our sound array to floating point values ranging from -1 to 1 as follows
-    mySoundShape = mySound.shape
-    # print('Shape is: {}'.format(mySoundShape))
-    # print('samplig freq is is: {}'.format(samplingFreq))
-    ## Assign chanels
-    L= mySound[:,0]
-    R= mySound[:,1]
-    del mySound
-    ## Convert to mono averaging both arrays
-    mono=np.average([L, R], axis=0)
-    del L
-    del R
-    ## normalize it
-    mono /= np.max(np.abs(mono),axis=0)
-    ## Create spectrogram
-    frequencies, times, spectrogram = signal.spectrogram(mono, samplingFreq)
-    del mono
-    ## Limit to first 24 frequencies (4KHz aprox)
-    spectrogram=spectrogram[:24,:]
-    frequencies=frequencies[0:24]
-    #frequencies[frequencies<700]=0
-    A_thres=8.0e-4
-    T_thres=4.0e-4
-    anchors = np.argwhere(spectrogram >= A_thres)
-    targets = np.argwhere((spectrogram > T_thres) & (spectrogram < A_thres) )
-    print('File:\t\t{}\nAnchors:\t\t{}\nTargets:\t\t{}\nTimes:\t\t{}\n------------'.format(file, len(anchors), len(targets), len(times)))
-    continue
-    # print(spectrogram.shape)
-    # print(times)
+def saveHashes(file):
+    #db = TinyDB('./db.json')
+    client = MongoClient('mongodb://192.168.1.46:27017/')
+    #client = MongoClient('mongodb://192.168.159.6:27017/')
+    db = client["txazam"]
+    collection = db["audiohashes"]
 
-    plt.pcolormesh(times, frequencies, spectrogram)
+    file = './inputs/'+file
+    ## Read file
+    sample_rate, samples = wavfile.read(file)
+    ## Convert to mono
+    mono=np.average([samples[:,0], samples[:,1]], axis=0)
+    ## Normalize
+    # mono /= np.max(np.abs(mono),axis=0)
+    ## Generate spectrogram
+    frequencies, times, spectrogram = signal.spectrogram(mono,sample_rate)
+    ## Cut frequencies
+    # spectrogram=spectrogram[:24,:]
+    # frequencies=frequencies[0:24]
+    ## Peak thresholds
+    A_thres=20000
+    T_thres=8000
+    ## Horizontal distance to avoid near peaks in the same frequency (197 samples/second)
+    N_thres=197*3
+    ## The same for the targets
+    TS_Thres=197*3 ## 300 ms
+    anchorTargetSeconds=3
+    anchorsArray=np.array([signal.find_peaks(e, distance = N_thres, height=A_thres)[0] for e in spectrogram])
+    targetsArray=np.array([signal.find_peaks(e, distance = TS_Thres, height=T_thres)[0] for e in spectrogram])
+    # print([e[0] for e in anchorsArray])
+    print('File: {}\nAnchors: {}\tTargets: {}'.format(str(file.strip().split('.')[2]).strip(), sum([len(e) for e in anchorsArray]), sum([len(e) for e in targetsArray])))
 
-    # plt.imshow(spectrogram)
+    linkList=set()
+    ## For each of 129 frequecies (f) in spectrogram
+    for f, _ in enumerate(spectrogram):
+        ## For each anchor in the frequecy
+        for a in anchorsArray[f]:
+            ## loop over all frequecies in the targets
+            for targetFreq, ter in enumerate(targetsArray):
+                ## for each target in the actual target frequency
+                for tps in ter:
+                    ## If the target is past time, and not after anchorTargetSeconds add to list
+                    if tps > a and tps< a+197*anchorTargetSeconds:
+                        linkList.add((f,targetFreq, tps-a))
+                    elif tps> a+197*anchorTargetSeconds: continue
+    linkDocs=[]
+    for e in linkList:
+        enter=e[0]
+        enter= enter<<8
+        enter+=e[1]
+        enter=enter<<16
+        enter+=e[2]
+        enter=enter.item()
+        linkDocs.append({'hash': enter, 'name':'{}'.format(file.strip().split('.')[2])})
+    print('Added: {}'.format(str(file.strip().split('.')[2]).strip()))
 
-    # # plt.ylabel('Frequency [Hz]')
+    ####linkDocs=[{'hash': '{}.{}.{}'.format(e[0], e[1], e[2]), 'name':'{}'.format(file.strip().split('.')[2])} for e in linkList]
+    
+    collection.insert_many(linkDocs)
 
-    # # plt.xlabel('Time [sec]')
-
-    #plt.show()
-    exit()
-    #mySound = mySound / (2.**15)
-
-    #Check sample points and sound channel for duel channel(5060, 2) or  (5060, ) for mono channel
+audioFiles = [f for f in listdir('inputs') if isfile(join('inputs', f))]
+Parallel(n_jobs=multiprocessing.cpu_count())(delayed(saveHashes)(file) for file in audioFiles)
 

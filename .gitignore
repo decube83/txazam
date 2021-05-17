@@ -1,3 +1,7 @@
-library1/
-library2/
+test/
+input/
+noisy_filtered_samples/
+noisy_samples/
+filtered_samples/
+clean/
 *.wav
